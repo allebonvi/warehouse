@@ -1,0 +1,37 @@
+{
+  "position": {
+    "relx": 0, "rely": 0,
+    "height_pct": 100,
+    "width_open_pct": 25,
+    "width_closed_pct": 8,
+    "start_open": false
+  },
+  "appearance": {
+    "title": "Navigation",
+    "show_icons": true,
+    "icon_size": 18,
+    "icon_color": "#222222",
+    "close_on_select": false,
+    "fa_ttf": "assets/fonts/Font Awesome 7 Free-Solid-900.otf"
+  },
+  "items": [
+    { "text": "Dashboard", "fa": {"char":"\uf015"}, "frame": "DashboardFrame" },
+
+    { "text": "Progetti", "fa": {"char":"\uf07c"}, "children": [
+      { "text": "Attivi",      "fa": {"char":"\uf0ae"}, "frame": "ProgettiAttiviFrame" },
+      { "text": "Archiviati",  "fa": {"char":"\uf187"}, "frame": "ProgettiArchiviatiFrame" }
+    ]},
+
+    { "section": "Impostazioni" },
+
+    { "text": "Sistema", "fa": {"char":"\uf013"}, "children": [
+      { "text": "Preferenze", "fa": {"char":"\uf013"}, "command": "open_settings" },
+      { "text": "Utenti",     "fa": {"char":"\uf007"}, "children": [
+        { "text": "Elenco",  "fa": {"char":"\uf03a"}, "frame": "UtentiFrame" },
+        { "text": "Ruoli",   "fa": {"char":"\uf02d"}, "frame": "RuoliFrame" }
+      ]}
+    ]},
+
+    { "text": "Esci", "fa": {"char":"\uf2f5"}, "command": "exit_app" }
+  ]
+}

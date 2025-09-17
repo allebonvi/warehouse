@@ -1,0 +1,16 @@
+[project]
+name = "warehouse"
+version = "0.0.1"
+requires-python = ">=3.12"
+dependencies = [
+  "sqlalchemy[asyncio]>=2.0",
+  "aioodbc>=0.3.3",
+  # "orjson>=3.9"  # opzionale: il tuo codice fa fallback su json puro
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "pytest-cov", "mypy", "black", "flake8"]
+
+[tool.pytest.ini_options]
+addopts = "-q --maxfail=1"
+pythonpath = ["."]

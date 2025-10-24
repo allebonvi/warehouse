@@ -1,205 +1,93 @@
-# async_mssql_client.py
-# pip install sqlalchemy[asyncio] aioodbc orjson
-
+# async_msssql_query.py — loop-safe, compat rows=list, no pooling
 from __future__ import annotations
-import asyncio
-import logging
-import time
-from typing import Any, Dict, Iterable, List, Optional
+
+import asyncio, urllib.parse, time, logging
+from typing import Any, Dict, Optional
+from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy.pool import NullPool
+from sqlalchemy import text
 
 try:
     import orjson as _json
-    def _dumps(obj: Any) -> str:
-        # default=str: serializza in modo sicuro datetimes/Decimal ecc.
-        return _json.dumps(obj, default=str).decode("utf-8")
+    def _dumps(obj: Any) -> str: return _json.dumps(obj, default=str).decode("utf-8")
 except Exception:
     import json as _json
-    def _dumps(obj: Any) -> str:
-        return _json.dumps(obj, default=str)
-
-from urllib.parse import quote_plus
-from sqlalchemy.ext.asyncio import create_async_engine, AsyncEngine
-from sqlalchemy import text
-
+    def _dumps(obj: Any) -> str: return _json.dumps(obj, default=str)
 
 def make_mssql_dsn(
-    server: str,
-    database: str,
-    user: Optional[str] = None,
-    password: Optional[str] = None,
-    *,
-    driver: str = "ODBC Driver 17 for SQL Server",
-    trust_server_certificate: Optional[bool] = None,
-    encrypt: Optional[str] = None,   # "yes"/"no" oppure "mandatory" (driver 18)
-    extra_odbc_kv: Optional[Dict[str, str]] = None,
+    *, server: str, database: str, user: Optional[str]=None, password: Optional[str]=None,
+    driver: str="ODBC Driver 17 for SQL Server", trust_server_certificate: bool=True,
+    encrypt: Optional[str]=None, extra_odbc_kv: Optional[Dict[str,str]]=None
 ) -> str:
-    """
-    Crea un DSN leggibile per mssql+aioodbc usando una connection string ODBC “umana”
-    che poi viene URL-encodata automaticamente.
-    """
-    parts: List[str] = [f"DRIVER={{{{}}}}".format(driver), f"SERVER={server}", f"DATABASE={database}"]
-    if user is not None:
-        parts.append(f"UID={user}")
-    if password is not None:
-        parts.append(f"PWD={password}")
-    if encrypt is not None:
-        parts.append(f"Encrypt={encrypt}")
-    if trust_server_certificate is not None:
-        parts.append(f"TrustServerCertificate={'Yes' if trust_server_certificate else 'No'}")
-    if extra_odbc_kv:
-        for k, v in extra_odbc_kv.items():
-            parts.append(f"{k}={v}")
-
-    odbc_str = ";".join(parts) + ";"
-    return f"mssql+aioodbc:///?odbc_connect={quote_plus(odbc_str)}"
-
+    kv = {"DRIVER": driver, "SERVER": server, "DATABASE": database,
+          "TrustServerCertificate": "Yes" if trust_server_certificate else "No"}
+    if user: kv["UID"] = user
+    if password: kv["PWD"] = password
+    if encrypt: kv["Encrypt"] = encrypt
+    if extra_odbc_kv: kv.update(extra_odbc_kv)
+    odbc = ";".join(f"{k}={v}" for k,v in kv.items()) + ";"
+    return f"mssql+aioodbc:///?odbc_connect={urllib.parse.quote_plus(odbc)}"
 
 class AsyncMSSQLClient:
     """
-    Client MSSQL async con:
-    - query_json(sql, params, ...) -> JSON {columns, rows, rowcount, elapsed_ms, metadata}
-    - logging opzionale (SQL, params, tempi, rowcount, eccezioni con traceback)
-    - context manager async (facoltativo)
-
-    Uso tipico:
-        dsn = make_mssql_dsn("localhost", "MyDb", "user", "pass")
-        client = AsyncMSSQLClient(dsn, enable_log=True)
-        json_payload = asyncio.run(client.query_json("SELECT TOP 5 * FROM dbo.Clienti WHERE Attivo=:a", {"a": 1}))
+    Engine creato pigramente sul loop corrente, senza pool (NullPool).
+    Evita “Future attached to a different loop” nei reset/close del pool.
     """
-
-    def __init__(
-        self,
-        dsn: str,
-        *,
-        enable_log: bool = False,
-        logger: Optional[logging.Logger] = None,
-        engine_kwargs: Optional[Dict[str, Any]] = None,
-    ) -> None:
+    def __init__(self, dsn: str, *, echo: bool=False, log: bool=True):
         self._dsn = dsn
-        self._engine: AsyncEngine = create_async_engine(dsn, future=True, **(engine_kwargs or {}))
-        self._logger = logger or logging.getLogger(self.__class__.__name__)
-        self._enable_log = enable_log
+        self._echo = echo
+        self._engine = None
+        self._engine_loop: Optional[asyncio.AbstractEventLoop] = None
+        self._logger = logging.getLogger("AsyncMSSQLClient")
+        if log and not self._logger.handlers:
+            h = logging.StreamHandler()
+            h.setFormatter(logging.Formatter("[%(levelname)s] %(message)s"))
+            self._logger.addHandler(h)
+        self._enable_log = log
 
-        if self._enable_log and not logger:
-            # Configurazione “gentile”: se non hai un logger, attiviamo basicConfig
-            logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-
-    async def __aenter__(self) -> "AsyncMSSQLClient":
-        return self
-
-    async def __aexit__(self, exc_type, exc, tb) -> None:
-        await self.close()
-
-    async def close(self) -> None:
-        await self._engine.dispose()
-
-    async def query_json(
-        self,
-        sql: str,
-        params: Optional[Dict[str, Any]] = None,
-        *,
-        max_rows: Optional[int] = None,
-        as_dict_rows: bool = False,
-        include_sql_in_payload: bool = False,
-    ) -> str:
-        """
-        Esegue una SELECT (o qualsiasi statement che ritorni righe) in modo asincrono.
-
-        Ritorna un JSON con:
-            {
-              "columns": [...],
-              "rows": [[...], ...]      # oppure [{"col": val, ...}, ...] se as_dict_rows=True
-              "rowcount": int,
-              "elapsed_ms": float,
-              "metadata": {"dialect": "...", "driver": "..."},
-              "sql": "...", "params": {...}  # opzionali se include_sql_in_payload=True
-            }
-
-        Logging:
-          - se enable_log=True, logga la query, i params, il tempo e l’eventuale eccezione.
-        """
-        t0 = time.perf_counter()
+    async def _ensure_engine(self):
+        if self._engine is not None:
+            return
+        loop = asyncio.get_running_loop()
+        self._engine = create_async_engine(
+            self._dsn,
+            echo=self._echo,
+            # IMPORTANTI:
+            poolclass=NullPool,                 # no pooling → no reset su loop “sbagliati”
+            connect_args={"loop": loop},        # usa il loop corrente in aioodbc
+        )
+        self._engine_loop = loop
         if self._enable_log:
-            self._logger.info("SQL start")
-            self._logger.info("query=%s", sql)
-            if params:
-                self._logger.info("params=%s", params)
+            self._logger.info("Engine created on loop %s", id(loop))
 
-        try:
-            async with self._engine.connect() as conn:
-                res = await conn.execute(text(sql), params or {})
-                cols = list(res.keys())
-
-                if as_dict_rows:
-                    # mappature (dict per riga)
-                    rows_iter = res.mappings()
-                    rows = (await rows_iter.fetchall()) if max_rows is None else await rows_iter.fetchmany(max_rows)
-                    data = [dict(r) for r in rows]
-                else:
-                    # lista di liste
-                    rows = res.fetchall() if max_rows is None else res.fetchmany(max_rows)
-                    data = [[row[i] for i in range(len(cols))] for row in rows]
-
-                elapsed = round((time.perf_counter() - t0) * 1000, 3)
-                payload = {
-                    "columns": cols,
-                    "rows": data,
-                    "rowcount": res.rowcount if res.rowcount is not None else len(data),
-                    "elapsed_ms": elapsed,
-                    "metadata": {
-                        "dialect": conn.engine.dialect.name,
-                        "driver": getattr(conn.engine.dialect, "driver", None),
-                    },
-                }
-                if include_sql_in_payload:
-                    payload["sql"] = sql
-                    if params:
-                        payload["params"] = params
-
-                if self._enable_log:
-                    self._logger.info("SQL done: rowcount=%s elapsed_ms=%.3f", payload["rowcount"], elapsed)
-
-                return _dumps(payload)
-
-        except Exception as e:
-            if self._enable_log:
-                self._logger.exception("SQL error while executing query")  # traceback completo
-            # Rispondiamo con un payload di errore utile al chiamante
-            elapsed = round((time.perf_counter() - t0) * 1000, 3)
-            err_payload = {
-                "error": str(e),
-                "elapsed_ms": elapsed,
-                "sql": sql if include_sql_in_payload or self._enable_log else None,
-                "params": (params or None) if (include_sql_in_payload or self._enable_log) else None,
-            }
-            return _dumps(err_payload)
-
-    async def execute_non_query(
-        self,
-        sql: str,
-        params: Optional[Dict[str, Any]] = None,
-        *,
-        commit: bool = True,
-    ) -> int:
-        """
-        Per INSERT/UPDATE/DELETE. Ritorna il rowcount. Con commit=True apre una transazione.
-        Logga errori se enable_log=True.
-        """
-        t0 = time.perf_counter()
+    async def dispose(self):
+        if self._engine is None:
+            return
+        # sempre sullo stesso loop in cui è nato
+        if asyncio.get_running_loop() is self._engine_loop:
+            await self._engine.dispose()
+        else:
+            fut = asyncio.run_coroutine_threadsafe(self._engine.dispose(), self._engine_loop)
+            fut.result(timeout=2)
+        self._engine = None
         if self._enable_log:
-            self._logger.info("EXEC start")
-            self._logger.info("query=%s", sql)
-            if params:
-                self._logger.info("params=%s", params)
-        try:
-            async with self._engine.begin() if commit else self._engine.connect() as conn:
-                res = await conn.execute(text(sql), params or {})
-                rc = res.rowcount or 0
-                if self._enable_log:
-                    self._logger.info("EXEC done: rowcount=%s elapsed_ms=%.3f",
-                                      rc, round((time.perf_counter() - t0) * 1000, 3))
-                return rc
-        except Exception:
-            if self._enable_log:
-                self._logger.exception("EXEC error")
-            raise
+            self._logger.info("Engine disposed")
+
+    async def query_json(self, sql: str, params: Optional[Dict[str, Any]]=None, *, as_dict_rows: bool=False) -> Dict[str, Any]:
+        await self._ensure_engine()
+        t0 = time.perf_counter()
+        async with self._engine.connect() as conn:
+            res = await conn.execute(text(sql), params or {})
+            rows = res.fetchall()
+            cols = list(res.keys())
+        if as_dict_rows:
+            rows_out = [dict(zip(cols, r)) for r in rows]
+        else:
+            rows_out = [list(r) for r in rows]
+        return {"columns": cols, "rows": rows_out, "elapsed_ms": round((time.perf_counter()-t0)*1000, 3)}
+
+    async def exec(self, sql: str, params: Optional[Dict[str, Any]]=None, *, commit: bool=False) -> int:
+        await self._ensure_engine()
+        async with (self._engine.begin() if commit else self._engine.connect()) as conn:
+            res = await conn.execute(text(sql), params or {})
+            return res.rowcount or 0

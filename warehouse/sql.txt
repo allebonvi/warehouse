@@ -1,0 +1,21 @@
+SELECT  *  FROM vViewMappaturaDescrizioneCorsia  WHERE ( Area > 0) ORDER BY Area Desc
+
+SELECT  *  FROM Celle  WHERE ( ID > 0) ORDER BY ID Desc
+
+SELECT TOP 1000 [mc_X]      ,[minFila]      ,[maxFila]      ,[minColonna]      ,[maxColonna]      ,[mc_Numero_Magazzino]      ,[mc_Numero_Area]  FROM vViewMappaturaPosizCorsia   WHERE  [mc_Numero_Area] =1
+
+
+SELECT  CASE WHEN Nota = 'ASC' THEN 0 ELSE CASE WHEN Nota = 'DESC' THEN 1 END END AS Nota  FROM MagLayout WHERE     (IDArea  = 1) 
+
+SELECT ID, Descrizione FROM Magazzini ORDER BY Descrizione
+
+SELECT ID, Descrizione FROM Celle ORDER BY Descrizione
+
+SELECT [ID],[CorsiaDescrizione] FROM vViewMappaturaDescrizioneCorsia
+
+
+ SELECT     COUNT(DISTINCT Pallet) AS Pallet, COUNT(DISTINCT Lotto) AS Lotto, COUNT(DISTINCT Articolo) AS Articolo, COUNT(DISTINCT Descrizione) AS Descrizione, SUM(Qta) AS Qta, Documento, CodNazione, NAZIONE, Stato, MAX(PalletCella) AS PalletCella, MAX(Magazzino) AS Magazzino, MAX(Area) AS Area, MAX(Cella) AS Cella, MIN(Ordinamento) AS Ordinamento, MAX(IDStato) AS IDStato  FROM         dbo.XMag_ViewPackingList  GROUP BY Documento, CodNazione, NAZIONE, Stato 
+ 
+ SELECT * FROM vViewPackingListRestante WHERE Documento = 237 ORDER BY Ordinamento 
+ SELECT * FROM vViewPackingListRestante WHERE Documento = 240 ORDER BY Ordinamento 
+ 
